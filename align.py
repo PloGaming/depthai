@@ -65,7 +65,8 @@ RGBCamera.setResolution(depthai.ColorCameraProperties.SensorResolution.THE_1080_
 RGBCamera.setInterleaved(CAMERA_INTERLEAVED)
 RGBCamera.setColorOrder(depthai.ColorCameraProperties.ColorOrder.RGB)
 RGBCamera.setFps(FPS)
-RGBCamera.video.link(sync.inputs["video"])
+RGBCamera.isp.link(sync.inputs["video"])
+RGBCamera.setIspScale(2, 3)
 
 
 sync.setSyncThreshold(timedelta(seconds=(1 / FPS) * 0.5))
@@ -86,6 +87,11 @@ with depthai.Device(pipeline) as OAKD:
         QUEUE_BLOCKING)
 
     maxDisparity = stereo.initialConfig.getMaxDisparity()
+
+    calibData = OAKD.readCalibration2()
+    lensPosition = calibData.getLensPosition(depthai.CameraBoardSocket.CAM_A)
+    if lensPosition:
+        RGBCamera.initialControl.setManualFocus(lensPosition)
 
     fpsCounter = FPSCounter()
     while True:

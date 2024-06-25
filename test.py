@@ -9,14 +9,18 @@ import time
 MS_THRESHOLD = 11
 
 EXTENDED_DISPARITY = False
+CAMERA_QUEUE_SIZE = 4
+QUEUE_BLOCKING = True
 SUBPIXEL = False
 LRCHECK = True
 THRESHOLD = 255
 BILATERAL_SIGMA = 0
 WINDOW_NAME = "rgb/depth"
+STREAM_NAME = "sync"
 
 rgbWeight = 0.4
 depthWeight = 0.6
+maxDisparity = 0
 messages = dict()
 
 class FPSCounter:
@@ -112,30 +116,26 @@ def create_pipeline(device):
     stereo.setLeftRightCheck(LRCHECK)
     stereo.setExtendedDisparity(EXTENDED_DISPARITY)
     stereo.setSubpixel(SUBPIXEL)
-
     stereo.setDepthAlign(depthai.CameraBoardSocket.CAM_A)
 
-    
     left.out.link(stereo.left)
     right.out.link(stereo.right)
 
-    # Linking
-    rgbOut = pipeline.create(depthai.node.XLinkOut)
-    rgbOut.setStreamName("rgb")
-    camRgb.isp.link(rgbOut.input)
+    sync = pipeline.create(depthai.node.Sync)
+    sync.setSyncThreshold(timedelta(milliseconds=MS_THRESHOLD))
 
-    disparityOut = pipeline.create(depthai.node.XLinkOut)
-    disparityOut.setStreamName("disp")
-    stereo.disparity.link(disparityOut.input)
+    camRgb.isp.link(sync.inputs["rgb"])
+    stereo.depth.link(sync.inputs["depth"])
 
     imu = pipeline.create(depthai.node.IMU)
     imu.enableIMUSensor(depthai.IMUSensor.ACCELEROMETER_RAW, 360)
     imu.setBatchReportThreshold(10)
     imu.setMaxBatchReports(10)
+    imu.out.link(sync.inputs["imu"])
 
-    imuOut = pipeline.create(depthai.node.XLinkOut)
-    imuOut.setStreamName("imu")
-    imu.out.link(imuOut.input)
+    xout = pipeline.createXLinkOut()
+    xout.setStreamName(STREAM_NAME)
+    sync.out.link(xout.input) 
 
     return pipeline
 
@@ -144,6 +144,7 @@ def td2ms(td) -> int:
     return int(td / timedelta(milliseconds=1))
 
 def new_msg(msg, name, timestamp=None):
+    global maxDisparity
     synced = add_msg(msg, name, timestamp)
 
     if not synced: return
@@ -157,7 +158,6 @@ def new_msg(msg, name, timestamp=None):
     frameRgb = rgb.getCvFrame()
     frameDisp = disp.getFrame()
     
-    maxDisparity = 95
     frameDisp = (frameDisp * 255. / maxDisparity).astype(numpy.uint8)
 
     frameDisp = cv2.applyColorMap(frameDisp, cv2.COLORMAP_TURBO)
@@ -177,23 +177,34 @@ device.startPipeline(create_pipeline(device))
 # Configure windows; trackbar adjusts blending ratio of rgb/depth
 cv2.namedWindow(WINDOW_NAME)
 cv2.createTrackbar('RGB Weight %', WINDOW_NAME, int(rgbWeight*100), 100, updateBlendWeights)
+
+print('Connection type: ', device.getUsbSpeed().name)
+print('Device name: ', device.getDeviceName())
+print('Device information: ', device.getDeviceInfo())
+
+queue = device.getOutputQueue(
+    STREAM_NAME, 
+    CAMERA_QUEUE_SIZE, 
+    QUEUE_BLOCKING)
+
+maxDisparity = stereo.initialConfig.getMaxDisparity()
+
 fps = FPSCounter()
-
 while True:
-    for name in ['rgb', 'disp', 'imu']:
-        msg = device.getOutputQueue(name).tryGet()
-        if msg is not None:
-            if name == 'imu':
-                for imuPacket in msg.packets:
-                    imuPacket: depthai.IMUPacket
-                    timestamp = imuPacket.acceleroMeter.getTimestampDevice()
-                    new_msg(imuPacket, name, timestamp)
-            else:
-                msg: depthai.ImgFrame
-                timestamp = msg.getTimestampDevice(depthai.CameraExposureOffset.MIDDLE)
-                new_msg(msg, name, timestamp)
+    msgGrp = queue.tryGet()
 
-    if cv2.waitKey(1) == ord('q'):
-        cv2.destroyAllWindows()
-        exit()
-        break
+    if msgGrp is not None:
+        fps.tick()
+        for name, msg in msgGrp:
+            print("fps: " + str(fps.getFps()))
+            if name == "depth":
+                frameDisp = (msg.getFrame() * 255. / maxDisparity).astype(numpy.uint8)
+                frameDisp = cv2.applyColorMap(frameDisp, cv2.COLORMAP_JET)
+                cv2.imshow("depth", frameDisp)
+            elif name == "rgb":
+                cv2.imshow("rgb", msg.getCvFrame())
+    else:
+        if cv2.waitKey(1) == ord("q"):
+            cv2.destroyAllWindows()
+            exit(0)
+            break
